@@ -138,7 +138,7 @@ def rotate_half(x):
 # Copied from transformers.models.mistral.modeling_mistral.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
-
+        对QK使用ROPE
     Args:
         q (`torch.Tensor`): The query tensor.
         k (`torch.Tensor`): The key tensor.
@@ -183,6 +183,10 @@ class Qwen2MLP(nn.Module):
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
+    torch.repeat_interleave
+    假设x是一个形状为(3, 2)的张量，repeats为3，
+    则调用torch.repeat_interleave(x, dim=0, repeats=3)会得到一个形状为(9, 2)的张量，其中每一行都是x的一行重复3次。
+
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
     num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
     """
@@ -256,6 +260,7 @@ class Qwen2Attention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
+        # 因为是使用的GHA，Q是按照num_heads分头，KV按num_key_value_heads,组数就是num_heads // num_key_value_heads
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -484,6 +489,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
         use_sliding_windows=False,
     ):
         """
+        如果输入的隐藏层包含padding token，先删除它，然后做Attention计算，算完之后再padding，也就是不对pad进行Attention计算
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
         first unpad the input, then computes the attention scores and pad the final attention scores.
 
@@ -623,6 +629,8 @@ class Qwen2FlashAttention2(Qwen2Attention):
 # Copied from transformers.models.mistral.modeling_mistral.MistralSdpaAttention with Mistral->Qwen2
 class Qwen2SdpaAttention(Qwen2Attention):
     """
+    The only changes are on the forward pass to adapt to SDPA API.
+
     Qwen2 attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
     `Qwen2Attention` as the weights of the module stays untouched. The only changes are on the forward pass to adapt to
     SDPA API.
@@ -725,6 +733,7 @@ class Qwen2DecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
+        # 根据超参选用哪种Attention
         self.self_attn = QWEN2_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
 
         self.mlp = Qwen2MLP(config)
@@ -759,7 +768,7 @@ class Qwen2DecoderLayer(nn.Module):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
-
+        # LN -> Attn -> LN -> MLP
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -814,6 +823,9 @@ QWEN2_START_DOCSTRING = r"""
     QWEN2_START_DOCSTRING,
 )
 class Qwen2PreTrainedModel(PreTrainedModel):
+    """
+    模型配置初始化，并支持模型随机参数初始化
+    """
     config_class = Qwen2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
@@ -824,6 +836,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
     _supports_cache_class = True
 
     def _init_weights(self, module):
+        # 初始化模型参数满足正态分布，初始化为均值为0，标准差为超参
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
@@ -1157,11 +1170,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-
+        # output_attentions 控制着模型是否输出用于计算最终输出的注意力权重。
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        # output_hidden_states 决定了模型是否输出隐藏层的状态
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        # 模型的前向方法是否返回一个包含所有输出的字典（如果设置为True），或者只返回最终的期望输出（如果设置为False）
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
@@ -1178,12 +1193,15 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+        logits = self.lm_head(hidden_states)  # 输出词表分类结果 hidden_size -> vocab_size
         logits = logits.float()
 
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
+            # ...: 这是Python中的椭圆操作符（ellipsis）。它用于表示选择除了显式指定的维度之外的所有其他维度。
+            # 选择logits的最后一个维度之前的所有维度，并选择这些维度中的所有元素，
+            # 然后选择倒数第二个维度中的所有元素（不包括最后一个），最后选择最后一个维度中的所有元素
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
@@ -1194,14 +1212,15 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
-        if not return_dict:
+        if not return_dict:  # 需要返回一个包含所有输出的字典
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            past_key_values=outputs.past_key_values,
+            past_key_values=outputs.past_key_values,  # 生成文本时保存的隐藏状态，用于在生成下一个token时继续使用模型，
+            # 而不需要从头开始计算 通常是一个由多个隐藏层状态组成的列表
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
@@ -1209,6 +1228,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ):
+        """
+        用于准备和整理输入参数，这个方法通常作为模型生成流程的一部分被调用，
+        目的是确保输入数据被正确地格式化和裁剪，以适应模型的期望。
+
+        """
         # Omit tokens covered by past_key_values
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
@@ -1276,10 +1300,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
 @add_start_docstrings(
     """
     The Qwen2 Model transformer with a sequence classification head on top (linear layer).
-
+    使用最后一个token做分类
+    然而在一些任务中，特定的位置可能更加重要，
+    比如问答任务中的问题和答案之间的token，或者机器翻译任务中源语言和目标语言之间的token。
+    因此，在这些情况下，选择其他位置的输出作为分类结果可能更为合适。
     [`Qwen2ForSequenceClassification`] uses the last token in order to do the classification, as other causal models
     (e.g. GPT-2) do.
-
+    预设pad_token就按照预设的找，没有预设就找每个样本的最后一个token
     Since it does classification on the last token, it requires to know the position of the last token. If a
     `pad_token_id` is defined in the configuration, it finds the last token that is not a padding token in each row. If
     no `pad_token_id` is defined, it simply takes the last value in each row of the batch. Since it cannot guess the

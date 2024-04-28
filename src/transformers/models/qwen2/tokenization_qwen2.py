@@ -35,7 +35,7 @@ VOCAB_FILES_NAMES = {
 
 
 MAX_MODEL_INPUT_SIZES = {"qwen/qwen-tokenizer": 32768}
-
+# 对文本进行分词,它会根据一定的规则将文本分割成单词、数字、标点符号等词元（tokens）
 PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
 
 
@@ -43,6 +43,8 @@ PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p
 # Copied from transformers.models.gpt2.tokenization_gpt2.bytes_to_unicode
 def bytes_to_unicode():
     """
+    构建一个字典，将 UTF-8 字节映射到 Unicode 字符串。
+    这个方法主要用于处理字节到字符的转换，尤其在处理字节级别的文本数据时非常有用。
     Returns list of utf-8 byte and a mapping to unicode strings. We specifically avoids mapping to whitespace/control
     characters the bpe code barfs on.
 
@@ -83,7 +85,8 @@ def get_pairs(word):
 class Qwen2Tokenizer(PreTrainedTokenizer):
     """
     Construct a Qwen2 tokenizer. Based on byte-level Byte-Pair-Encoding.
-
+    基于字节级别的PE
+    BPE适用于处理非空格分隔的语言，而字符级别编码适用于处理空格分隔的语言。
     Same with GPT2Tokenizer, this tokenizer has been trained to treat spaces like parts of the tokens so a word will
     be encoded differently whether it is at the beginning of the sentence (without space) or not:
 
@@ -168,7 +171,7 @@ class Qwen2Tokenizer(PreTrainedTokenizer):
             if isinstance(pad_token, str)
             else pad_token
         )
-
+        # 加载vocab.json并使用bpe，最后将其合并结果保存至merges.txt
         with open(vocab_file, encoding="utf-8") as vocab_handle:
             self.encoder = json.load(vocab_handle)
         self.decoder = {v: k for k, v in self.encoder.items()}
